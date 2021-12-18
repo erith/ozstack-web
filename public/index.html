@@ -1,7 +1,11 @@
 <html>
   <head>
     <title>OZSTACK Corporation</title>
-    
+    <meta charset="UTF-8">
+    <meta name="description" content="OZSTACK Corporation">
+    <meta name="keywords" content="Softwafer Development">
+    <meta name="author" content="ozstack">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <style>
 @font-face {
     font-family: 'Dongle-Bold';
@@ -16,13 +20,15 @@ body {
   margin: 0;
   padding: 0;
   cursor: pointer;
+
 }
 canvas {
   border: 1px soild black;
+  
 }
 div.dialog {
   display: inline-block;
-  padding: .3em;
+  padding: 2em;
   font-family: 'Dongle-Bold', cursive;
   position: absolute;
   top: 50%;
@@ -32,6 +38,9 @@ div.dialog {
   transform: translate(-50%,-50%);
   color: rgba(255,255,255,.68);
   border: .075em solid rgba(255,255,255,.1);
+  border-radius: 3px;
+  backdrop-filter: blur(12px);
+  z-index: 15;
 }
 
 .title {
@@ -41,18 +50,56 @@ div.dialog {
 .mark1 {
   font-size:25pt;
 }
+
+.skill_windows {
+  color: rgb(137, 153, 243);
+}
+
+.skill_server {
+  color: rgb(231, 121, 121);
+}
+
+.skill_web {
+  color: rgb(115, 226, 133);
+}
+
+
+.mail_txt {
+  color: rgb(219, 226, 115);
+}
+
+
+div.back {
+  width:100%;
+  height:100%;
+  margin:0;
+  padding:0;
+  backdrop-filter: blur(2px);
+  position: absolute;
+  left:0;
+  top:0;
+  z-index: 5;
+}
 </style>
 
   </head>
   <body >
     <canvas id="canvas"></canvas>
     <div class="dialog">
-      <span class="title">OZ STACK</span><br />
-      <span class="mark1">Windows Desktop | xNix Server | Web</span><br />
-      <span class="mark1">Application Development Team</span><br />
-      <span class="mark1">contact to sales@ozstack.com</span>
+      <!--<img src='./images/logo-w.png' alt="OZSTACK" width="286" /><br />-->
+      <span class="title">OZ STACK</span>
+      <br />
+      <span class="mark1">
+        <span class="skill_windows">Windows Desktop</span>, 
+        <span class="skill_server">Server</span>, 
+        <span class="skill_web">Web</span></span><br />
+      <span class="mark1">
+        <span class="skill_team">Application Development Team</span></span><br />
+        <span class="mark1">contact to 
+        <a href="mailto:sales@ozstack.com" class="mail_txt">sales@ozstack.com</a>
+      </span>
     </div>
-
+    <div class="back"></div>
 <script>
   // Little Canvas things
   var canvas = document.querySelector("#canvas"),
