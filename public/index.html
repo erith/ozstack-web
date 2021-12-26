@@ -14,6 +14,14 @@
         font-weight: normal;
         font-style: normal;
       }
+      @font-face {
+        font-family: "Pretendard-Regular";
+        src: url("https://cdn.jsdelivr.net/gh/Project-Noonnu/noonfonts_2107@1.1/Pretendard-Regular.woff")
+          format("woff");
+        font-weight: 400;
+        font-style: normal;
+      }
+
       html,
       body {
         height: 100%;
@@ -48,7 +56,7 @@
         color: #fff;
       }
       .mark1 {
-        font-size: 1.3em;
+        font-size: 1.2em;
       }
 
       .skill_windows {
@@ -85,7 +93,7 @@
       }
 
       .detail {
-        font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+        font-family: "Pretendard-Regular";
         line-height: 1.8em;
         font-size: 1.2em;
       }
@@ -105,15 +113,16 @@
           <span class="skill_web">웹</span></span
         ><br />
         <span class="mark1"
-          ><span class="skill_windows">전문 개발사입니다.</span></span
+          ><span class="skill_windows"
+            >애플리케이션 전문 개발사입니다.</span
+          ></span
         >
         <br /><br />
-        현재 사이트는 준비 중입니다.
+        <span class="mark1"> 현재 사이트는 준비 중입니다.</span>
       </div>
       <br />
       <div class="detail">
-        <span class="mark1"
-          >contact to
+        <span class="mark1">
           <a href="mailto:sales@ozstack.com" class="mail_txt"
             >sales@ozstack.com</a
           >
@@ -251,7 +260,7 @@
 
       // Colors
       var colorPalette = {
-        bg: { r: 12, g: 9, b: 29 },
+        bg: { r: 40, g: 20, b: 49 },
         matter: [
           { r: 36, g: 18, b: 42 }, // darkPRPL
           { r: 78, g: 36, b: 42 }, // rockDust
