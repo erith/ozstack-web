@@ -23,7 +23,7 @@
         cursor: pointer;
       }
       canvas {
-        border: 1px soild black;
+        border: 1px soild rgb(33, 11, 112);
       }
       div.dialog {
         display: inline-block;
@@ -48,23 +48,27 @@
         color: #fff;
       }
       .mark1 {
-        font-size: 25pt;
+        font-size: 1.3em;
       }
 
       .skill_windows {
-        color: rgb(137, 153, 243);
+        color: #ddd;
+        /* color: rgb(137, 153, 243); */
       }
 
       .skill_server {
-        color: rgb(231, 121, 121);
+        color: #ddd;
+        /* color: rgb(231, 121, 121);*/
       }
 
       .skill_web {
-        color: rgb(115, 226, 133);
+        color: #ddd;
+        /*color: rgb(115, 226, 133);*/
       }
 
       .mail_txt {
-        color: rgb(219, 226, 115);
+        color: #ddd;
+        /* color: rgb(219, 226, 115); */
       }
 
       div.back {
@@ -81,7 +85,9 @@
       }
 
       .detail {
+        font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
         line-height: 1.8em;
+        font-size: 1.2em;
       }
     </style>
   </head>
@@ -89,17 +95,20 @@
     <canvas id="canvas"></canvas>
     <div class="dialog">
       <!--<img src='./images/logo-w.png' alt="OZSTACK" width="286" /><br />-->
+      <!-- <img src="./images/ozstack-logo-w.png" alt="OZSTACK" /><br />-->
       <span class="title">OZ STACK</span>
       <br />
       <div class="detail">
         <span class="mark1">
-          <span class="skill_windows">Windows Desktop</span>,
-          <span class="skill_server">Server</span>,
-          <span class="skill_web">Web</span></span
+          <span class="skill_windows">저희는 윈도우즈 데스크탑</span>,
+          <span class="skill_server">서버</span>,
+          <span class="skill_web">웹</span></span
         ><br />
         <span class="mark1"
-          ><span class="skill_team">Application Development Team</span></span
+          ><span class="skill_windows">전문 개발사입니다.</span></span
         >
+        <br /><br />
+        현재 사이트는 준비 중입니다.
       </div>
       <br />
       <div class="detail">
@@ -217,6 +226,10 @@
           />
         </svg>
       </div>
+      <br />
+      <span style="font-size: 0.8em; font-family: Arial, Helvetica, sans-serif"
+        >&#169; All Rights Reserved, 2021</span
+      >
     </div>
     <div class="back"></div>
     <script>
