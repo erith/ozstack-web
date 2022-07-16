@@ -428,12 +428,14 @@
                 <div
                   style="
                     margin-top: 50px;
-                    display: flex;
+                    display: grid;
                     width: 100%;
                     align-items: center;
+                    grid-template-columns: repeat(2, 1fr);
+                    gap: 2em;
                   "
                 >
-                  <div class="col-6">
+                  <div>
                     <svg
                       version="1.1"
                       id="Layer_1"
@@ -441,8 +443,8 @@
                       xmlns:xlink="http://www.w3.org/1999/xlink"
                       x="0px"
                       y="0px"
-                      width="301.586px"
-                      height="109.58px"
+                      width="100%"
+                      height="100%"
                       viewBox="0 0 301.586 109.58"
                       enable-background="new 0 0 301.586 109.58"
                       xml:space="preserve"
@@ -586,8 +588,12 @@
                       </g>
                     </svg>
                   </div>
-                  <div class="col-6">
-                    <img src="./images/bespin.png" alt="베스핀글로벌 로고" />
+                  <div>
+                    <img
+                      src="./images/bespin.png"
+                      alt="베스핀글로벌 로고"
+                      style="width: 100%"
+                    />
                   </div>
                 </div>
               </div>
