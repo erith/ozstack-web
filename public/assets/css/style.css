@@ -13023,7 +13023,7 @@ form.checkout-coupon input[type=text] {
 }
 
 #home {
-    height: 400px;
+    height: 480px;
 }
 
 .header-txt-wrapper {
@@ -13040,6 +13040,7 @@ form.checkout-coupon input[type=text] {
 #home .heading .heading-desc {
     /* text-shadow: 0 0 10px rgb(105 8 191); */
     opacity: 0.8;
+    font-size : 18px;
 }
 
 .card-title {
