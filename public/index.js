@@ -1,0 +1,1436 @@
+(() => {
+  "use strict";
+
+  const canvas = document.getElementById("globe");
+  const logoWrap = document.querySelector(".logo-wrap");
+  const isCoarsePointer = matchMedia("(pointer: coarse)").matches;
+  const isSmallViewport = matchMedia("(max-width: 820px)").matches;
+  const memory = navigator.deviceMemory || 4;
+  const cores = navigator.hardwareConcurrency || 4;
+  const isConstrainedDevice = isCoarsePointer || isSmallViewport || memory <= 4 || cores <= 4;
+  const profile = {
+    pixelRatio: isConstrainedDevice ? 1.25 : 2,
+    mapSize: isConstrainedDevice ? [1024, 512] : [2048, 1024],
+    sphereBands: isConstrainedDevice ? [72, 144] : [160, 320],
+    starCount: isConstrainedDevice ? 650 : 1500,
+    ringSegments: isConstrainedDevice ? 96 : 192,
+    emissionBurst: isConstrainedDevice ? 90 : 260,
+    emissionCap: isConstrainedDevice ? 220 : 500,
+    particleStrong: isConstrainedDevice ? 58 : 104,
+    particleMin: isConstrainedDevice ? 18 : 34,
+    particleMax: isConstrainedDevice ? 42 : 78,
+    particleCap: isConstrainedDevice ? 620 : 1350,
+    pulseCap: isConstrainedDevice ? 12 : 24
+  };
+  /*
+  const axisPitchEl = document.getElementById("axisPitch");
+  const axisYawEl = document.getElementById("axisYaw");
+  const axisRollEl = document.getElementById("axisRoll");
+  */
+  const gl = canvas.getContext("webgl", {
+    antialias: !isConstrainedDevice,
+    alpha: true,
+    depth: true,
+    premultipliedAlpha: false
+  });
+
+  if (!gl) {
+    document.body.innerHTML = "<p style='color:white;padding:24px;font-family:sans-serif'>WebGL을 사용할 수 없는 브라우저입니다.</p>";
+    return;
+  }
+
+  const vertexSource = `
+    attribute vec3 aPosition;
+    attribute vec4 aColor;
+    attribute float aSize;
+    uniform mat4 uMatrix;
+    uniform float uPixelRatio;
+    varying vec4 vColor;
+    void main() {
+      vec4 world = uMatrix * vec4(aPosition, 1.0);
+      gl_Position = world;
+      gl_PointSize = max(1.0, aSize * uPixelRatio / max(0.42, gl_Position.w));
+      vColor = aColor;
+    }
+  `;
+
+  const fragmentSource = `
+    precision mediump float;
+    varying vec4 vColor;
+    void main() {
+      float dist = length(gl_PointCoord - vec2(0.5));
+      if (dist > 0.5) discard;
+      float core = smoothstep(0.5, 0.12, dist);
+      gl_FragColor = vec4(vColor.rgb, vColor.a * core);
+    }
+  `;
+
+  const lineFragmentSource = `
+    precision mediump float;
+    varying vec4 vColor;
+    void main() {
+      gl_FragColor = vColor;
+    }
+  `;
+
+  const textureVertexSource = `
+    attribute vec3 aPosition;
+    attribute vec2 aUv;
+    uniform mat4 uMatrix;
+    varying vec2 vUv;
+    varying vec3 vNormal;
+    void main() {
+      vUv = aUv;
+      vNormal = normalize(aPosition);
+      gl_Position = uMatrix * vec4(aPosition, 1.0);
+    }
+  `;
+
+  const textureFragmentSource = `
+    precision mediump float;
+    uniform sampler2D uMap;
+    uniform float uTime;
+    varying vec2 vUv;
+    varying vec3 vNormal;
+    void main() {
+      float rawMask = texture2D(uMap, vUv).r;
+      float mask = smoothstep(0.08, 0.42, rawMask);
+      float coast = smoothstep(0.01, 0.22, rawMask) - smoothstep(0.38, 0.72, rawMask);
+      vec2 dotCell = fract(vUv * vec2(520.0, 260.0)) - 0.5;
+      float dots = smoothstep(0.34, 0.09, length(dotCell));
+      float scan = 0.78 + 0.22 * sin((vUv.y * 170.0) + uTime * 2.0);
+      float edge = pow(1.0 - abs(vNormal.z), 2.4);
+      vec3 land = mix(vec3(0.5, 0.24, 0.92), vec3(0.98, 0.78, 1.0), mask);
+      float alpha = mask * (0.12 + dots * 0.82) * scan + coast * 0.28 + edge * 0.05;
+      gl_FragColor = vec4(land, alpha);
+    }
+  `;
+
+  const labelVertexSource = `
+    attribute vec3 aPosition;
+    attribute vec2 aUv;
+    uniform mat4 uMatrix;
+    varying vec2 vUv;
+    void main() {
+      vUv = aUv;
+      gl_Position = uMatrix * vec4(aPosition, 1.0);
+    }
+  `;
+
+  const labelFragmentSource = `
+    precision mediump float;
+    uniform sampler2D uLabel;
+    varying vec2 vUv;
+    void main() {
+      vec4 texel = texture2D(uLabel, vUv);
+      if (texel.a < 0.02) discard;
+      gl_FragColor = texel;
+    }
+  `;
+
+  function compile(type, source) {
+    const shader = gl.createShader(type);
+    gl.shaderSource(shader, source);
+    gl.compileShader(shader);
+    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+      throw new Error(gl.getShaderInfoLog(shader));
+    }
+    return shader;
+  }
+
+  function makeProgram(fragment) {
+    const program = gl.createProgram();
+    gl.attachShader(program, compile(gl.VERTEX_SHADER, vertexSource));
+    gl.attachShader(program, compile(gl.FRAGMENT_SHADER, fragment));
+    gl.linkProgram(program);
+    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+      throw new Error(gl.getProgramInfoLog(program));
+    }
+    return {
+      program,
+      position: gl.getAttribLocation(program, "aPosition"),
+      color: gl.getAttribLocation(program, "aColor"),
+      size: gl.getAttribLocation(program, "aSize"),
+      matrix: gl.getUniformLocation(program, "uMatrix"),
+      pixelRatio: gl.getUniformLocation(program, "uPixelRatio")
+    };
+  }
+
+  function makeTextureProgram() {
+    const program = gl.createProgram();
+    gl.attachShader(program, compile(gl.VERTEX_SHADER, textureVertexSource));
+    gl.attachShader(program, compile(gl.FRAGMENT_SHADER, textureFragmentSource));
+    gl.linkProgram(program);
+    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+      throw new Error(gl.getProgramInfoLog(program));
+    }
+    return {
+      program,
+      position: gl.getAttribLocation(program, "aPosition"),
+      uv: gl.getAttribLocation(program, "aUv"),
+      matrix: gl.getUniformLocation(program, "uMatrix"),
+      map: gl.getUniformLocation(program, "uMap"),
+      time: gl.getUniformLocation(program, "uTime")
+    };
+  }
+
+  function makeLabelProgram() {
+    const program = gl.createProgram();
+    gl.attachShader(program, compile(gl.VERTEX_SHADER, labelVertexSource));
+    gl.attachShader(program, compile(gl.FRAGMENT_SHADER, labelFragmentSource));
+    gl.linkProgram(program);
+    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+      throw new Error(gl.getProgramInfoLog(program));
+    }
+    return {
+      program,
+      position: gl.getAttribLocation(program, "aPosition"),
+      uv: gl.getAttribLocation(program, "aUv"),
+      matrix: gl.getUniformLocation(program, "uMatrix"),
+      label: gl.getUniformLocation(program, "uLabel")
+    };
+  }
+
+  const pointProgram = makeProgram(fragmentSource);
+  const lineProgram = makeProgram(lineFragmentSource);
+  const textureProgram = makeTextureProgram();
+  const labelProgram = makeLabelProgram();
+
+  function createBuffer(data, usage = gl.STATIC_DRAW) {
+    const buffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+    gl.bufferData(gl.ARRAY_BUFFER, data, usage);
+    return buffer;
+  }
+
+  function createTexture(source) {
+    const texture = gl.createTexture();
+    updateTexture(texture, source);
+    return texture;
+  }
+
+  function fitTextureSource(source) {
+    const sourceWidth = source.naturalWidth || source.videoWidth || source.width || profile.mapSize[0];
+    const sourceHeight = source.naturalHeight || source.videoHeight || source.height || profile.mapSize[1];
+    const maxWidth = profile.mapSize[0];
+    const maxHeight = profile.mapSize[1];
+    if (sourceWidth <= maxWidth && sourceHeight <= maxHeight) return source;
+
+    const scale = Math.min(maxWidth / sourceWidth, maxHeight / sourceHeight);
+    const textureCanvas = document.createElement("canvas");
+    textureCanvas.width = Math.max(1, Math.round(sourceWidth * scale));
+    textureCanvas.height = Math.max(1, Math.round(sourceHeight * scale));
+    const ctx = textureCanvas.getContext("2d", { alpha: true });
+    ctx.drawImage(source, 0, 0, textureCanvas.width, textureCanvas.height);
+    return textureCanvas;
+  }
+
+  function updateTexture(texture, source) {
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+    try {
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, fitTextureSource(source));
+    } catch (error) {
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, createUvMapImage());
+    }
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  }
+
+  function spherePoint(lat, lon, radius = 1) {
+    const phi = (90 - lat) * Math.PI / 180;
+    const theta = (lon + 180) * Math.PI / 180;
+    return [
+      -radius * Math.sin(phi) * Math.cos(theta),
+      radius * Math.cos(phi),
+      radius * Math.sin(phi) * Math.sin(theta)
+    ];
+  }
+
+  function earthUvPoint(lat, lon, radius = 1) {
+    const latRad = lat * Math.PI / 180;
+    const lonRad = lon * Math.PI / 180;
+    const cosLat = Math.cos(latRad);
+    return [
+      radius * cosLat * Math.sin(lonRad),
+      radius * Math.sin(latRad),
+      radius * cosLat * Math.cos(lonRad)
+    ];
+  }
+
+  function normalize(v) {
+    const d = Math.hypot(v[0], v[1], v[2]) || 1;
+    return [v[0] / d, v[1] / d, v[2] / d];
+  }
+
+  function mix(a, b, t) {
+    return a + (b - a) * t;
+  }
+
+  function smoothstep(edge0, edge1, value) {
+    const t = Math.max(0, Math.min(1, (value - edge0) / (edge1 - edge0)));
+    return t * t * (3 - 2 * t);
+  }
+
+  function slerp(a, b, t) {
+    const dot = Math.max(-0.999, Math.min(0.999, a[0] * b[0] + a[1] * b[1] + a[2] * b[2]));
+    const theta = Math.acos(dot) * t;
+    const rel = normalize([b[0] - a[0] * dot, b[1] - a[1] * dot, b[2] - a[2] * dot]);
+    return [
+      a[0] * Math.cos(theta) + rel[0] * Math.sin(theta),
+      a[1] * Math.cos(theta) + rel[1] * Math.sin(theta),
+      a[2] * Math.cos(theta) + rel[2] * Math.sin(theta)
+    ];
+  }
+
+  function multiply(a, b) {
+    const out = new Float32Array(16);
+    for (let c = 0; c < 4; c += 1) {
+      for (let r = 0; r < 4; r += 1) {
+        out[r + c * 4] =
+          a[r] * b[c * 4] +
+          a[r + 4] * b[c * 4 + 1] +
+          a[r + 8] * b[c * 4 + 2] +
+          a[r + 12] * b[c * 4 + 3];
+      }
+    }
+    return out;
+  }
+
+  function perspective(fov, aspect, near, far) {
+    const f = 1 / Math.tan(fov / 2);
+    const nf = 1 / (near - far);
+    return new Float32Array([
+      f / aspect, 0, 0, 0,
+      0, f, 0, 0,
+      0, 0, (far + near) * nf, -1,
+      0, 0, (2 * far * near) * nf, 0
+    ]);
+  }
+
+  function translate(z) {
+    return new Float32Array([
+      1, 0, 0, 0,
+      0, 1, 0, 0,
+      0, 0, 1, 0,
+      0, 0, z, 1
+    ]);
+  }
+
+  function translate3(x, y, z) {
+    return new Float32Array([
+      1, 0, 0, 0,
+      0, 1, 0, 0,
+      0, 0, 1, 0,
+      x, y, z, 1
+    ]);
+  }
+
+  function scale3(x, y, z) {
+    return new Float32Array([
+      x, 0, 0, 0,
+      0, y, 0, 0,
+      0, 0, z, 0,
+      0, 0, 0, 1
+    ]);
+  }
+
+  function rotateX(rad) {
+    const c = Math.cos(rad);
+    const s = Math.sin(rad);
+    return new Float32Array([
+      1, 0, 0, 0,
+      0, c, s, 0,
+      0, -s, c, 0,
+      0, 0, 0, 1
+    ]);
+  }
+
+  function rotateY(rad) {
+    const c = Math.cos(rad);
+    const s = Math.sin(rad);
+    return new Float32Array([
+      c, 0, -s, 0,
+      0, 1, 0, 0,
+      s, 0, c, 0,
+      0, 0, 0, 1
+    ]);
+  }
+
+  function rotateZ(rad) {
+    const c = Math.cos(rad);
+    const s = Math.sin(rad);
+    return new Float32Array([
+      c, s, 0, 0,
+      -s, c, 0, 0,
+      0, 0, 1, 0,
+      0, 0, 0, 1
+    ]);
+  }
+
+  function createGrid() {
+    const positions = [];
+    const colors = [];
+    const sizes = [];
+    const push = (p, alpha, tint = [0.72, 0.34, 1]) => {
+      positions.push(p[0], p[1], p[2]);
+      colors.push(tint[0], tint[1], tint[2], alpha);
+      sizes.push(1);
+    };
+
+    for (let lat = -75; lat <= 75; lat += 15) {
+      for (let lon = -180; lon < 180; lon += 3) {
+        push(earthUvPoint(lat, lon), lat === 0 ? 0.42 : 0.2);
+        push(earthUvPoint(lat, lon + 3), lat === 0 ? 0.42 : 0.2);
+      }
+    }
+
+    for (let lon = -180; lon < 180; lon += 15) {
+      for (let lat = -84; lat < 84; lat += 3) {
+        push(earthUvPoint(lat, lon), lon % 45 === 0 ? 0.32 : 0.18);
+        push(earthUvPoint(lat + 3, lon), lon % 45 === 0 ? 0.32 : 0.18);
+      }
+    }
+
+    const routes = [
+      [[37.77, -122.42], [35.68, 139.69]],
+      [[40.71, -74.0], [51.5, -0.12]],
+      [[1.35, 103.82], [52.52, 13.4]],
+      [[-33.86, 151.2], [19.43, -99.13]],
+      [[48.85, 2.35], [25.2, 55.27]]
+    ];
+
+    for (const route of routes) {
+      const a = earthUvPoint(route[0][0], route[0][1], 1.015);
+      const b = earthUvPoint(route[1][0], route[1][1], 1.015);
+      for (let i = 0; i < 42; i += 1) {
+        const p0 = slerp(a, b, i / 42);
+        const p1 = slerp(a, b, (i + 1) / 42);
+        const lift0 = 1 + Math.sin((i / 42) * Math.PI) * 0.16;
+        const lift1 = 1 + Math.sin(((i + 1) / 42) * Math.PI) * 0.16;
+        push([p0[0] * lift0, p0[1] * lift0, p0[2] * lift0], 0.13, [0.86, 0.52, 1]);
+        push([p1[0] * lift1, p1[1] * lift1, p1[2] * lift1], 0.13, [0.86, 0.52, 1]);
+      }
+    }
+
+    return {
+      count: positions.length / 3,
+      position: createBuffer(new Float32Array(positions)),
+      color: createBuffer(new Float32Array(colors)),
+      size: createBuffer(new Float32Array(sizes))
+    };
+  }
+
+  const landContours = [
+      [
+        [71, -156], [62, -145], [59, -132], [50, -126], [43, -124], [33, -117],
+        [24, -111], [17, -96], [9, -83], [18, -78], [27, -82], [31, -88],
+        [29, -97], [25, -101], [29, -107], [39, -112], [48, -124], [55, -129],
+        [60, -139], [68, -150], [71, -156]
+      ],
+      [
+        [53, -78], [58, -65], [51, -56], [44, -61], [46, -72], [53, -78]
+      ],
+      [
+        [13, -81], [7, -75], [1, -79], [-8, -77], [-18, -70], [-33, -71],
+        [-44, -73], [-54, -68], [-50, -58], [-36, -55], [-23, -43], [-7, -35],
+        [4, -49], [10, -61], [13, -81]
+      ],
+      [
+        [36, -10], [51, 0], [60, 8], [66, 28], [56, 42], [45, 38],
+        [38, 30], [32, 16], [28, 6], [36, -10]
+      ],
+      [
+        [35, -6], [30, 12], [22, 32], [12, 43], [2, 42], [-10, 35],
+        [-22, 18], [-34, 18], [-35, 28], [-26, 41], [-12, 49], [4, 40],
+        [18, 37], [29, 30], [36, 10], [35, -6]
+      ],
+      [
+        [72, 54], [65, 88], [58, 117], [52, 141], [43, 149], [35, 139],
+        [31, 122], [23, 111], [14, 101], [8, 78], [19, 72], [25, 57],
+        [34, 45], [45, 48], [56, 60], [64, 50], [72, 54]
+      ],
+      [
+        [25, 66], [20, 78], [9, 80], [8, 92], [18, 97], [7, 106],
+        [-6, 106], [-7, 115], [6, 125], [20, 121], [30, 122], [25, 106],
+        [20, 91], [25, 80], [30, 70], [25, 66]
+      ],
+      [
+        [-11, 113], [-20, 119], [-30, 130], [-38, 145], [-28, 154],
+        [-16, 147], [-12, 132], [-11, 113]
+      ],
+      [
+        [83, -53], [76, -25], [66, -22], [60, -44], [66, -62], [76, -70],
+        [83, -53]
+      ],
+      [
+        [36, 130], [42, 139], [39, 145], [32, 141], [31, 134], [36, 130]
+      ],
+      [
+        [22, 120], [25, 122], [23, 125], [20, 123], [22, 120]
+      ]
+    ];
+
+  function pointInPolygon(lat, lon, polygon) {
+    let inside = false;
+    for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i, i += 1) {
+      const yi = polygon[i][0];
+      const xi = polygon[i][1];
+      const yj = polygon[j][0];
+      const xj = polygon[j][1];
+      const intersects = ((yi > lat) !== (yj > lat)) &&
+        (lon < (xj - xi) * (lat - yi) / ((yj - yi) || 0.000001) + xi);
+      if (intersects) inside = !inside;
+    }
+    return inside;
+  }
+
+  function createUvMapImage() {
+    const mapCanvas = document.createElement("canvas");
+    mapCanvas.width = profile.mapSize[0];
+    mapCanvas.height = profile.mapSize[1];
+    const ctx = mapCanvas.getContext("2d");
+    ctx.clearRect(0, 0, mapCanvas.width, mapCanvas.height);
+
+    const xFromLon = (lon) => (lon + 180) / 360 * mapCanvas.width;
+    const yFromLat = (lat) => (90 - lat) / 180 * mapCanvas.height;
+
+    ctx.fillStyle = "rgba(255,255,255,0.88)";
+    ctx.strokeStyle = "rgba(255,255,255,1)";
+    ctx.lineWidth = 3;
+    ctx.lineJoin = "round";
+    ctx.lineCap = "round";
+
+    for (const polygon of landContours) {
+      ctx.beginPath();
+      polygon.forEach(([lat, lon], index) => {
+        const x = xFromLon(lon);
+        const y = yFromLat(lat);
+        if (index === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      });
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+    }
+
+    ctx.globalCompositeOperation = "source-over";
+    ctx.fillStyle = "rgba(255,255,255,0.24)";
+    for (const polygon of landContours) {
+      const lats = polygon.map((p) => p[0]);
+      const lons = polygon.map((p) => p[1]);
+      const minLat = Math.max(-58, Math.floor(Math.min(...lats)));
+      const maxLat = Math.min(84, Math.ceil(Math.max(...lats)));
+      const minLon = Math.floor(Math.min(...lons));
+      const maxLon = Math.ceil(Math.max(...lons));
+      for (let lat = minLat; lat <= maxLat; lat += 2.8) {
+        for (let lon = minLon; lon <= maxLon; lon += 2.8) {
+          if (!pointInPolygon(lat, lon, polygon)) continue;
+          const x = xFromLon(lon);
+          const y = yFromLat(lat);
+          ctx.fillRect(x - 1.1, y - 1.1, 2.2, 2.2);
+        }
+      }
+    }
+
+    return mapCanvas;
+  }
+
+  function createTexturedSphere() {
+    const positions = [];
+    const uvs = [];
+    const [latBands, lonBands] = profile.sphereBands;
+    const pushVertex = (latIndex, lonIndex) => {
+      const v = latIndex / latBands;
+      const u = lonIndex / lonBands;
+      const lat = 90 - v * 180;
+      const lon = u * 360 - 180;
+      const p = earthUvPoint(lat, lon, 1.012);
+      positions.push(p[0], p[1], p[2]);
+      uvs.push(u, v);
+    };
+
+    for (let lat = 0; lat < latBands; lat += 1) {
+      for (let lon = 0; lon < lonBands; lon += 1) {
+        pushVertex(lat, lon);
+        pushVertex(lat + 1, lon);
+        pushVertex(lat, lon + 1);
+        pushVertex(lat, lon + 1);
+        pushVertex(lat + 1, lon);
+        pushVertex(lat + 1, lon + 1);
+      }
+    }
+
+    return {
+      count: positions.length / 3,
+      position: createBuffer(new Float32Array(positions)),
+      uv: createBuffer(new Float32Array(uvs))
+    };
+  }
+
+  function createLandDots() {
+    const positions = [];
+    const colors = [];
+    const sizes = [];
+    for (const polygon of landContours) {
+      const lats = polygon.map((p) => p[0]);
+      const lons = polygon.map((p) => p[1]);
+      const minLat = Math.max(-58, Math.floor(Math.min(...lats)));
+      const maxLat = Math.min(84, Math.ceil(Math.max(...lats)));
+      const minLon = Math.floor(Math.min(...lons));
+      const maxLon = Math.ceil(Math.max(...lons));
+
+      for (let lat = minLat; lat <= maxLat; lat += 2.6) {
+        for (let lon = minLon; lon <= maxLon; lon += 2.6) {
+          const jitterLat = lat + Math.sin((lat * 12.9898 + lon * 78.233) * 0.14) * 0.45;
+          const jitterLon = lon + Math.cos((lat * 4.271 + lon * 19.113) * 0.19) * 0.45;
+          if (!pointInPolygon(jitterLat, jitterLon, polygon)) continue;
+          const p = spherePoint(jitterLat, jitterLon, 1.021);
+          const coastGlow = Math.abs(jitterLat) > 55 ? 0.62 : 0.78;
+          positions.push(p[0], p[1], p[2]);
+          colors.push(0.96, 0.7, 1, Math.min(1.0, coastGlow + 0.12));
+          sizes.push(2.2);
+        }
+      }
+    }
+    return {
+      count: positions.length / 3,
+      position: createBuffer(new Float32Array(positions)),
+      color: createBuffer(new Float32Array(colors)),
+      size: createBuffer(new Float32Array(sizes))
+    };
+  }
+
+  function createLandMesh() {
+    const positions = [];
+    const colors = [];
+    const sizes = [];
+    const hash = (lat, lon) => Math.sin(lat * 12.9898 + lon * 78.233) * 43758.5453 % 1;
+
+    for (const polygon of landContours) {
+      const lats = polygon.map((p) => p[0]);
+      const lons = polygon.map((p) => p[1]);
+      const minLat = Math.max(-58, Math.floor(Math.min(...lats)));
+      const maxLat = Math.min(84, Math.ceil(Math.max(...lats)));
+      const minLon = Math.floor(Math.min(...lons));
+      const maxLon = Math.ceil(Math.max(...lons));
+      const step = 5.2;
+      const rows = [];
+
+      for (let lat = minLat; lat <= maxLat; lat += step) {
+        const row = [];
+        for (let lon = minLon; lon <= maxLon; lon += step) {
+          const jitterLat = lat + Math.sin((lat * 9.11 + lon * 3.91) * 0.16) * 0.55;
+          const jitterLon = lon + Math.cos((lat * 2.71 + lon * 7.43) * 0.17) * 0.55;
+          row.push(pointInPolygon(jitterLat, jitterLon, polygon) ? [jitterLat, jitterLon] : null);
+        }
+        rows.push(row);
+      }
+
+      const connect = (a, b, alpha) => {
+        if (!a || !b) return;
+        const pa = spherePoint(a[0], a[1], 1.019);
+        const pb = spherePoint(b[0], b[1], 1.019);
+        positions.push(pa[0], pa[1], pa[2], pb[0], pb[1], pb[2]);
+        colors.push(0.76, 0.42, 1, alpha, 0.76, 0.42, 1, alpha);
+        sizes.push(1, 1);
+      };
+
+      for (let y = 0; y < rows.length; y += 1) {
+        for (let x = 0; x < rows[y].length; x += 1) {
+          const alpha = 0.2 + Math.abs(hash(y, x)) * 0.2;
+          connect(rows[y][x], rows[y][x + 1], alpha);
+          connect(rows[y][x], rows[y + 1]?.[x], alpha * 0.8);
+          if (Math.abs(hash(x, y)) > 0.72) {
+            connect(rows[y][x], rows[y + 1]?.[x + 1], alpha * 0.62);
+          }
+        }
+      }
+    }
+
+    return {
+      count: positions.length / 3,
+      position: createBuffer(new Float32Array(positions)),
+      color: createBuffer(new Float32Array(colors)),
+      size: createBuffer(new Float32Array(sizes))
+    };
+  }
+
+  function createGlowRings() {
+    const positions = [];
+    const colors = [];
+    const sizes = [];
+    const rings = [
+      { radius: 1.055, alpha: 0.16, color: [0.72, 0.32, 1] },
+      { radius: 1.095, alpha: 0.1, color: [0.9, 0.58, 1] },
+      { radius: 1.14, alpha: 0.06, color: [0.62, 0.26, 1] }
+    ];
+
+    for (const ring of rings) {
+      for (let i = 0; i < profile.ringSegments; i += 1) {
+        const a0 = i / profile.ringSegments * Math.PI * 2;
+        const a1 = (i + 1) / profile.ringSegments * Math.PI * 2;
+        const p0 = [Math.cos(a0) * ring.radius, Math.sin(a0) * ring.radius, 0];
+        const p1 = [Math.cos(a1) * ring.radius, Math.sin(a1) * ring.radius, 0];
+        positions.push(p0[0], p0[1], p0[2], p1[0], p1[1], p1[2]);
+        colors.push(ring.color[0], ring.color[1], ring.color[2], ring.alpha, ring.color[0], ring.color[1], ring.color[2], ring.alpha);
+        sizes.push(1, 1);
+      }
+    }
+
+    return {
+      count: positions.length / 3,
+      position: createBuffer(new Float32Array(positions)),
+      color: createBuffer(new Float32Array(colors)),
+      size: createBuffer(new Float32Array(sizes))
+    };
+  }
+
+  function createStarField() {
+    const positions = [];
+    const colors = [];
+    const sizes = [];
+    const count = profile.starCount;
+    for (let i = 0; i < count; i += 1) {
+      const depth = mix(-16, -4.2, Math.random());
+      const spread = Math.abs(depth) * 1.55;
+      const x = mix(-spread, spread, Math.random());
+      const y = mix(-spread * 0.62, spread * 0.62, Math.random());
+      const brightStar = Math.random() > 0.9;
+      const brightness = brightStar ? mix(0.82, 1, Math.random()) : mix(0.42, 0.9, Math.random() * Math.random());
+      const cool = Math.random() > 0.78;
+      positions.push(x, y, depth);
+      colors.push(
+        cool ? brightness * 0.72 : brightness * 0.9,
+        cool ? brightness * 0.86 : brightness * 0.94,
+        brightness,
+        brightStar ? 1 : mix(0.48, 0.92, Math.random())
+      );
+      sizes.push(brightStar ? mix(18, 34, Math.random()) : mix(7, 18, Math.random() * Math.random()));
+    }
+
+    return {
+      count: positions.length / 3,
+      position: createBuffer(new Float32Array(positions)),
+      color: createBuffer(new Float32Array(colors)),
+      size: createBuffer(new Float32Array(sizes))
+    };
+  }
+
+  function createMapOutlines() {
+    const positions = [];
+    const colors = [];
+    const sizes = [];
+
+    const pushSegment = (a, b, alpha) => {
+      const steps = Math.max(2, Math.ceil(Math.hypot(a[0] - b[0], a[1] - b[1]) / 2.2));
+      let prev = spherePoint(a[0], a[1], 1.028);
+      for (let i = 1; i <= steps; i += 1) {
+        const t = i / steps;
+        const next = spherePoint(mix(a[0], b[0], t), mix(a[1], b[1], t), 1.028);
+        positions.push(prev[0], prev[1], prev[2], next[0], next[1], next[2]);
+        colors.push(0.92, 0.66, 1, alpha, 0.92, 0.66, 1, alpha);
+        sizes.push(1, 1);
+        prev = next;
+      }
+    };
+
+    for (const contour of landContours) {
+      for (let i = 0; i < contour.length - 1; i += 1) {
+        pushSegment(contour[i], contour[i + 1], 0.92);
+      }
+    }
+
+    return {
+      count: positions.length / 3,
+      position: createBuffer(new Float32Array(positions)),
+      color: createBuffer(new Float32Array(colors)),
+      size: createBuffer(new Float32Array(sizes))
+    };
+  }
+
+  function createOfficeMarker() {
+    const center = earthUvPoint(37.275, 127.116, 1.024);
+    return {
+      position: createBuffer(new Float32Array([
+        center[0], center[1], center[2],
+        center[0], center[1], center[2],
+        center[0], center[1], center[2]
+      ]), gl.DYNAMIC_DRAW),
+      color: createBuffer(new Float32Array([
+        1.0, 0.82, 0.18, 1.0,
+        1.0, 0.62, 0.05, 0.58,
+        1.0, 0.95, 0.52, 0.34
+      ]), gl.DYNAMIC_DRAW),
+      size: createBuffer(new Float32Array([13, 28, 48]), gl.DYNAMIC_DRAW),
+      sizes: new Float32Array([13, 28, 48]),
+      count: 3
+    };
+  }
+
+  function createLabelTexture() {
+    const labelCanvas = document.createElement("canvas");
+    labelCanvas.width = 512;
+    labelCanvas.height = 128;
+    const ctx = labelCanvas.getContext("2d");
+    ctx.clearRect(0, 0, labelCanvas.width, labelCanvas.height);
+    ctx.fillStyle = "rgba(28, 22, 8, 0.72)";
+    ctx.strokeStyle = "rgba(255, 220, 92, 0.86)";
+    ctx.lineWidth = 3;
+    roundRect(ctx, 14, 22, 280, 70, 8);
+    ctx.fill();
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(48, 57, 8, 0, Math.PI * 2);
+    ctx.fillStyle = "rgba(255, 216, 74, 1)";
+    ctx.shadowColor = "rgba(255, 216, 74, 1)";
+    ctx.shadowBlur = 22;
+    ctx.fill();
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = "#fff2a6";
+    ctx.font = "700 30px Inter, Arial, sans-serif";
+    ctx.letterSpacing = "4px";
+    ctx.fillText("OZSTACK", 70, 67);
+    return createTexture(labelCanvas);
+  }
+
+  function roundRect(ctx, x, y, width, height, radius) {
+    ctx.beginPath();
+    ctx.moveTo(x + radius, y);
+    ctx.lineTo(x + width - radius, y);
+    ctx.quadraticCurveTo(x + width, y, x + width, y + radius);
+    ctx.lineTo(x + width, y + height - radius);
+    ctx.quadraticCurveTo(x + width, y + height, x + width - radius, y + height);
+    ctx.lineTo(x + radius, y + height);
+    ctx.quadraticCurveTo(x, y + height, x, y + height - radius);
+    ctx.lineTo(x, y + radius);
+    ctx.quadraticCurveTo(x, y, x + radius, y);
+    ctx.closePath();
+  }
+
+  function createOfficeLabel() {
+    const anchor = earthUvPoint(37.275, 127.116, 1.08);
+    const normal = normalize(anchor);
+    const tangent = normalize([normal[2], 0, -normal[0]]);
+    const bitangent = normalize([
+      normal[1] * tangent[2] - normal[2] * tangent[1],
+      normal[2] * tangent[0] - normal[0] * tangent[2],
+      normal[0] * tangent[1] - normal[1] * tangent[0]
+    ]);
+    const width = 0.42;
+    const height = 0.105;
+    const offset = 0.2;
+    const center = [
+      anchor[0] + tangent[0] * offset + bitangent[0] * height * 0.35,
+      anchor[1] + tangent[1] * offset + bitangent[1] * height * 0.35,
+      anchor[2] + tangent[2] * offset + bitangent[2] * height * 0.35
+    ];
+    const corner = (tx, by) => [
+      center[0] + tangent[0] * tx * width + bitangent[0] * by * height,
+      center[1] + tangent[1] * tx * width + bitangent[1] * by * height,
+      center[2] + tangent[2] * tx * width + bitangent[2] * by * height
+    ];
+    const a = corner(-0.5, -0.5);
+    const b = corner(0.5, -0.5);
+    const c = corner(-0.5, 0.5);
+    const d = corner(0.5, 0.5);
+    return {
+      position: createBuffer(new Float32Array([
+        a[0], a[1], a[2], b[0], b[1], b[2], c[0], c[1], c[2],
+        c[0], c[1], c[2], b[0], b[1], b[2], d[0], d[1], d[2]
+      ])),
+      uv: createBuffer(new Float32Array([
+        0, 1, 1, 1, 0, 0,
+        0, 0, 1, 1, 1, 0
+      ])),
+      texture: createLabelTexture(),
+      count: 6
+    };
+  }
+
+  function createOfficeLabelLine() {
+    const start = earthUvPoint(37.275, 127.116, 1.028);
+    const anchor = earthUvPoint(37.275, 127.116, 1.08);
+    const normal = normalize(anchor);
+    const tangent = normalize([normal[2], 0, -normal[0]]);
+    const bitangent = normalize([
+      normal[1] * tangent[2] - normal[2] * tangent[1],
+      normal[2] * tangent[0] - normal[0] * tangent[2],
+      normal[0] * tangent[1] - normal[1] * tangent[0]
+    ]);
+    const end = [
+      anchor[0] + tangent[0] * 0.02 + bitangent[0] * 0.02,
+      anchor[1] + tangent[1] * 0.02 + bitangent[1] * 0.02,
+      anchor[2] + tangent[2] * 0.02 + bitangent[2] * 0.02
+    ];
+    return {
+      count: 2,
+      position: createBuffer(new Float32Array([
+        start[0], start[1], start[2],
+        end[0], end[1], end[2]
+      ])),
+      color: createBuffer(new Float32Array([
+        1.0, 0.86, 0.22, 0.86,
+        1.0, 0.92, 0.46, 0.62
+      ])),
+      size: createBuffer(new Float32Array([1, 1]))
+    };
+  }
+
+  const grid = createGrid();
+  const uvSphere = createTexturedSphere();
+  const mapTexture = createTexture(createUvMapImage());
+  const mapImage = new Image();
+  mapImage.addEventListener("load", () => updateTexture(mapTexture, mapImage));
+  mapImage.addEventListener("error", () => updateTexture(mapTexture, createUvMapImage()));
+  mapImage.src = "world-map.png";
+  const starField = createStarField();
+  const glowRings = createGlowRings();
+  const officeMarker = createOfficeMarker();
+  const officeLabel = createOfficeLabel();
+  const officeLabelLine = createOfficeLabelLine();
+  const maxParticleFloats = (profile.particleCap + 50) * 3;
+  const particlePositions = new Float32Array(maxParticleFloats);
+  const particleColors = new Float32Array((profile.particleCap + 50) * 4);
+  const particleSizes = new Float32Array(profile.particleCap + 50);
+  const particleBuffer = {
+    position: createBuffer(particlePositions, gl.DYNAMIC_DRAW),
+    color: createBuffer(particleColors, gl.DYNAMIC_DRAW),
+    size: createBuffer(particleSizes, gl.DYNAMIC_DRAW),
+    count: 0
+  };
+  const emissionPositions = new Float32Array((profile.emissionCap + 20) * 3);
+  const emissionColors = new Float32Array((profile.emissionCap + 20) * 4);
+  const emissionSizes = new Float32Array(profile.emissionCap + 20);
+  const emissionBuffer = {
+    position: createBuffer(emissionPositions, gl.DYNAMIC_DRAW),
+    color: createBuffer(emissionColors, gl.DYNAMIC_DRAW),
+    size: createBuffer(emissionSizes, gl.DYNAMIC_DRAW),
+    count: 0
+  };
+  const pulsePositions = new Float32Array(profile.pulseCap * 42 * 2 * 3);
+  const pulseColors = new Float32Array(profile.pulseCap * 42 * 2 * 4);
+  const pulseSizes = new Float32Array(profile.pulseCap * 42 * 2);
+  const pulseBuffer = {
+    position: createBuffer(pulsePositions, gl.DYNAMIC_DRAW),
+    color: createBuffer(pulseColors, gl.DYNAMIC_DRAW),
+    size: createBuffer(pulseSizes, gl.DYNAMIC_DRAW),
+    count: 0
+  };
+  const particles = [];
+  const emissions = [];
+  const pulses = [];
+  let width = 1;
+  let height = 1;
+  let matrix = new Float32Array(16);
+  let rotation = 0;
+  let axisPitch = 14.5;
+  let axisYaw = -153.3;
+  let axisRoll = 10.5;
+  /*
+  let isDraggingAxis = false;
+  let dragStartX = 0;
+  let dragStartY = 0;
+  let dragStartPitch = 0;
+  let dragStartYaw = 0;
+  */
+  let pointerX = 0;
+  let pointerY = 0;
+  let shakeTime = 0;
+  let shakeStrength = 0;
+  const officePoint = earthUvPoint(37.275, 127.116, 1.08);
+
+  /*
+  function updateAxisPanel() {
+    axisPitchEl.textContent = `pitch: ${axisPitch.toFixed(1)}deg`;
+    axisYawEl.textContent = `yaw: ${axisYaw.toFixed(1)}deg`;
+    axisRollEl.textContent = `roll: ${axisRoll.toFixed(1)}deg`;
+  }
+
+  updateAxisPanel();
+  */
+
+  function bindAttributes(programInfo, bufferSet) {
+    gl.bindBuffer(gl.ARRAY_BUFFER, bufferSet.position);
+    gl.enableVertexAttribArray(programInfo.position);
+    gl.vertexAttribPointer(programInfo.position, 3, gl.FLOAT, false, 0, 0);
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, bufferSet.color);
+    gl.enableVertexAttribArray(programInfo.color);
+    gl.vertexAttribPointer(programInfo.color, 4, gl.FLOAT, false, 0, 0);
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, bufferSet.size);
+    gl.enableVertexAttribArray(programInfo.size);
+    gl.vertexAttribPointer(programInfo.size, 1, gl.FLOAT, false, 0, 0);
+  }
+
+  function bindTextureAttributes(bufferSet) {
+    gl.bindBuffer(gl.ARRAY_BUFFER, bufferSet.position);
+    gl.enableVertexAttribArray(textureProgram.position);
+    gl.vertexAttribPointer(textureProgram.position, 3, gl.FLOAT, false, 0, 0);
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, bufferSet.uv);
+    gl.enableVertexAttribArray(textureProgram.uv);
+    gl.vertexAttribPointer(textureProgram.uv, 2, gl.FLOAT, false, 0, 0);
+  }
+
+  function bindLabelAttributes(bufferSet) {
+    gl.bindBuffer(gl.ARRAY_BUFFER, bufferSet.position);
+    gl.enableVertexAttribArray(labelProgram.position);
+    gl.vertexAttribPointer(labelProgram.position, 3, gl.FLOAT, false, 0, 0);
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, bufferSet.uv);
+    gl.enableVertexAttribArray(labelProgram.uv);
+    gl.vertexAttribPointer(labelProgram.uv, 2, gl.FLOAT, false, 0, 0);
+  }
+
+  function resize() {
+    const ratio = Math.min(window.devicePixelRatio || 1, profile.pixelRatio);
+    width = Math.max(1, Math.floor(canvas.clientWidth * ratio));
+    height = Math.max(1, Math.floor(canvas.clientHeight * ratio));
+    if (canvas.width !== width || canvas.height !== height) {
+      canvas.width = width;
+      canvas.height = height;
+      gl.viewport(0, 0, width, height);
+    }
+  }
+
+  function screenToSphere(clientX, clientY) {
+    const rect = canvas.getBoundingClientRect();
+    const x = ((clientX - rect.left) / rect.width) * 2 - 1;
+    const y = -(((clientY - rect.top) / rect.height) * 2 - 1);
+    pointerX = x;
+    pointerY = y;
+    const r = 0.72;
+    const len = Math.hypot(x, y);
+    if (len > r) {
+      return randomSurfacePoint();
+    }
+    const z = Math.sqrt(Math.max(0, r * r - len * len)) / r;
+    const local = normalize([x / r, y / r, z]);
+    const invY = -rotation;
+    const cy = Math.cos(invY);
+    const sy = Math.sin(invY);
+    return normalize([
+      local[0] * cy - local[2] * sy,
+      local[1],
+      local[0] * sy + local[2] * cy
+    ]);
+  }
+
+  function randomSurfacePoint() {
+    const lat = mix(-62, 68, Math.random());
+    const lon = mix(-180, 180, Math.random());
+    return earthUvPoint(lat, lon, 1);
+  }
+
+  function randomLandPoint() {
+    for (let attempt = 0; attempt < 80; attempt += 1) {
+      const polygon = landContours[Math.floor(Math.random() * landContours.length)];
+      const lats = polygon.map((p) => p[0]);
+      const lons = polygon.map((p) => p[1]);
+      const lat = mix(Math.min(...lats), Math.max(...lats), Math.random());
+      const lon = mix(Math.min(...lons), Math.max(...lons), Math.random());
+      if (pointInPolygon(lat, lon, polygon)) {
+        return earthUvPoint(lat, lon, 1.034);
+      }
+    }
+    return randomSurfacePoint();
+  }
+
+  function flashWorldEmissions() {
+    const total = profile.emissionBurst;
+    for (let i = 0; i < total; i += 1) {
+      const point = randomLandPoint();
+      emissions.push({
+        x: point[0],
+        y: point[1],
+        z: point[2],
+        age: -Math.random() * 0.42,
+        life: mix(1.05, 1.75, Math.random()),
+        size: mix(14, 34, Math.random()),
+        shimmer: mix(2.5, 6.5, Math.random()),
+        phase: Math.random() * Math.PI * 2,
+        hue: Math.random()
+      });
+    }
+    while (emissions.length > profile.emissionCap) emissions.shift();
+  }
+
+  function burst(origin, strong = false) {
+    const normal = normalize(origin);
+    const tint = Math.random() > 0.5 ? [0.82, 0.42, 1] : [0.95, 0.7, 1];
+    const total = strong ? profile.particleStrong : Math.floor(mix(profile.particleMin, profile.particleMax, Math.random()));
+    pulses.push({ origin: normal, age: 0, life: 1.25, tint });
+    while (pulses.length > profile.pulseCap) pulses.shift();
+
+    for (let i = 0; i < total; i += 1) {
+      const spread = normalize([
+        normal[0] + (Math.random() - 0.5) * 0.9,
+        normal[1] + (Math.random() - 0.5) * 0.9,
+        normal[2] + (Math.random() - 0.5) * 0.9
+      ]);
+      const speed = mix(0.34, strong ? 1.18 : 0.82, Math.random());
+      particles.push({
+        x: normal[0] * 1.03,
+        y: normal[1] * 1.03,
+        z: normal[2] * 1.03,
+        vx: spread[0] * speed + normal[0] * 0.18,
+        vy: spread[1] * speed + normal[1] * 0.18,
+        vz: spread[2] * speed + normal[2] * 0.18,
+        age: 0,
+        life: mix(0.65, 1.5, Math.random()),
+        size: mix(4, strong ? 10 : 7, Math.random()),
+        tint
+      });
+    }
+
+    while (particles.length > profile.particleCap) particles.shift();
+  }
+
+  function shakeGlobe(strength = 1) {
+    shakeTime = 0.52;
+    shakeStrength = Math.min(1.25, shakeStrength + strength);
+  }
+
+  function projectPoint(point, transform) {
+    const x = point[0];
+    const y = point[1];
+    const z = point[2];
+    const clipX = transform[0] * x + transform[4] * y + transform[8] * z + transform[12];
+    const clipY = transform[1] * x + transform[5] * y + transform[9] * z + transform[13];
+    const clipZ = transform[2] * x + transform[6] * y + transform[10] * z + transform[14];
+    const clipW = transform[3] * x + transform[7] * y + transform[11] * z + transform[15];
+    return { x: clipX / clipW, y: clipY / clipW, z: clipZ / clipW, w: clipW };
+  }
+
+  function isOfficeVisible() {
+    const projected = projectPoint(officePoint, matrix);
+    const center = projectPoint([0, 0, 0], matrix);
+    return projected.w > 0 && projected.z > -1 && projected.z < 1 && projected.z <= center.z - 0.004;
+  }
+
+  function updateParticles(dt) {
+    let write = 0;
+    for (let i = particles.length - 1; i >= 0; i -= 1) {
+      const p = particles[i];
+      p.age += dt;
+      if (p.age >= p.life) {
+        particles.splice(i, 1);
+        continue;
+      }
+      const drag = Math.pow(0.22, dt);
+      p.vx *= drag;
+      p.vy *= drag;
+      p.vz *= drag;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      p.z += p.vz * dt;
+      const fade = 1 - p.age / p.life;
+      particlePositions[write * 3] = p.x;
+      particlePositions[write * 3 + 1] = p.y;
+      particlePositions[write * 3 + 2] = p.z;
+      particleColors[write * 4] = p.tint[0];
+      particleColors[write * 4 + 1] = p.tint[1];
+      particleColors[write * 4 + 2] = p.tint[2];
+      particleColors[write * 4 + 3] = fade * 0.88;
+      particleSizes[write] = p.size * (0.35 + fade);
+      write += 1;
+    }
+    particleBuffer.count = write;
+    gl.bindBuffer(gl.ARRAY_BUFFER, particleBuffer.position);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, particlePositions.subarray(0, write * 3));
+    gl.bindBuffer(gl.ARRAY_BUFFER, particleBuffer.color);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, particleColors.subarray(0, write * 4));
+    gl.bindBuffer(gl.ARRAY_BUFFER, particleBuffer.size);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, particleSizes.subarray(0, write));
+  }
+
+  function updateEmissions(dt) {
+    let write = 0;
+    for (let i = emissions.length - 1; i >= 0; i -= 1) {
+      const emission = emissions[i];
+      emission.age += dt;
+      if (emission.age >= emission.life) {
+        emissions.splice(i, 1);
+        continue;
+      }
+      if (emission.age < 0) continue;
+
+      const t = emission.age / emission.life;
+      const fadeIn = smoothstep(0, 0.32, t);
+      const fadeOut = 1 - smoothstep(0.58, 1, t);
+      const pulse = 0.78 + Math.sin(t * Math.PI * emission.shimmer + emission.phase) * 0.22;
+      const alpha = Math.min(1, fadeIn * fadeOut * pulse * 1.35);
+      const sparkle = Math.max(0, Math.sin((t * 18 + emission.phase) * Math.PI)) * fadeOut;
+      const goldMix = emission.hue > 0.28 ? 1 : 0;
+
+      emissionPositions[write * 3] = emission.x;
+      emissionPositions[write * 3 + 1] = emission.y;
+      emissionPositions[write * 3 + 2] = emission.z;
+      emissionColors[write * 4] = goldMix ? 1.0 : 0.92;
+      emissionColors[write * 4 + 1] = goldMix ? 0.88 + sparkle * 0.12 : 0.58 + sparkle * 0.18;
+      emissionColors[write * 4 + 2] = goldMix ? 0.2 + sparkle * 0.22 : 1.0;
+      emissionColors[write * 4 + 3] = alpha;
+      emissionSizes[write] = emission.size * (0.65 + alpha * 1.05 + sparkle * 0.55);
+      write += 1;
+    }
+    emissionBuffer.count = write;
+    gl.bindBuffer(gl.ARRAY_BUFFER, emissionBuffer.position);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, emissionPositions.subarray(0, write * 3));
+    gl.bindBuffer(gl.ARRAY_BUFFER, emissionBuffer.color);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, emissionColors.subarray(0, write * 4));
+    gl.bindBuffer(gl.ARRAY_BUFFER, emissionBuffer.size);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, emissionSizes.subarray(0, write));
+  }
+
+  function updatePulseLines(dt) {
+    let write = 0;
+    for (let i = pulses.length - 1; i >= 0; i -= 1) {
+      const pulse = pulses[i];
+      pulse.age += dt;
+      if (pulse.age >= pulse.life) {
+        pulses.splice(i, 1);
+        continue;
+      }
+      const t = pulse.age / pulse.life;
+      const radius = 0.05 + t * 0.42;
+      const alpha = (1 - t) * 0.52;
+      const n = pulse.origin;
+      const tangent = normalize(Math.abs(n[1]) < 0.9 ? [n[2], 0, -n[0]] : [1, 0, 0]);
+      const bitangent = normalize([
+        n[1] * tangent[2] - n[2] * tangent[1],
+        n[2] * tangent[0] - n[0] * tangent[2],
+        n[0] * tangent[1] - n[1] * tangent[0]
+      ]);
+      for (let s = 0; s < 42; s += 1) {
+        if (write >= pulseSizes.length) break;
+        const a0 = s / 42 * Math.PI * 2;
+        const a1 = (s + 1) / 42 * Math.PI * 2;
+        for (const a of [a0, a1]) {
+          if (write >= pulseSizes.length) break;
+          const p = normalize([
+            n[0] + (Math.cos(a) * tangent[0] + Math.sin(a) * bitangent[0]) * radius,
+            n[1] + (Math.cos(a) * tangent[1] + Math.sin(a) * bitangent[1]) * radius,
+            n[2] + (Math.cos(a) * tangent[2] + Math.sin(a) * bitangent[2]) * radius
+          ]);
+          pulsePositions[write * 3] = p[0] * 1.025;
+          pulsePositions[write * 3 + 1] = p[1] * 1.025;
+          pulsePositions[write * 3 + 2] = p[2] * 1.025;
+          pulseColors[write * 4] = pulse.tint[0];
+          pulseColors[write * 4 + 1] = pulse.tint[1];
+          pulseColors[write * 4 + 2] = pulse.tint[2];
+          pulseColors[write * 4 + 3] = alpha;
+          pulseSizes[write] = 1;
+          write += 1;
+        }
+      }
+    }
+    pulseBuffer.count = write;
+    gl.bindBuffer(gl.ARRAY_BUFFER, pulseBuffer.position);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, pulsePositions.subarray(0, write * 3));
+    gl.bindBuffer(gl.ARRAY_BUFFER, pulseBuffer.color);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, pulseColors.subarray(0, write * 4));
+    gl.bindBuffer(gl.ARRAY_BUFFER, pulseBuffer.size);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, pulseSizes.subarray(0, write));
+  }
+
+  let last = performance.now();
+  let autoTimer = 0.22;
+
+  function frame(now) {
+    resize();
+    const dt = Math.min(0.034, (now - last) / 1000);
+    last = now;
+    autoTimer -= dt;
+    if (autoTimer <= 0) {
+      const burstCount = Math.random() > 0.82 ? 2 : 1;
+      for (let i = 0; i < burstCount; i += 1) {
+        burst(randomSurfacePoint(), false);
+      }
+      autoTimer = mix(0.35, 1.35, Math.random());
+    }
+
+    rotation += dt * 0.18 + pointerX * dt * 0.018;
+    shakeTime = Math.max(0, shakeTime - dt);
+    const shakePhase = (0.52 - shakeTime) * 64;
+    const shakeFade = shakeTime > 0 ? shakeTime / 0.52 : 0;
+    const shakeX = Math.sin(shakePhase) * 0.035 * shakeFade * shakeStrength;
+    const shakeY = Math.cos(shakePhase * 1.27) * 0.022 * shakeFade * shakeStrength;
+    const shakeRoll = Math.sin(shakePhase * 1.7) * 1.6 * shakeFade * shakeStrength;
+    shakeStrength *= Math.pow(0.05, dt);
+    updateParticles(dt);
+    updateEmissions(dt);
+    updatePulseLines(dt);
+
+    gl.clearColor(0, 0, 0, 0);
+    gl.clearDepth(1);
+    gl.enable(gl.DEPTH_TEST);
+    gl.depthFunc(gl.LEQUAL);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+    const aspect = width / height;
+    const projection = perspective(Math.PI / 4.3, aspect, 0.1, 20);
+    const time = now * 0.001;
+    const zoomCycle = (Math.sin(time * 0.52) + 1) * 0.5;
+    const cameraZ = mix(aspect < 0.82 ? -3.65 : -2.95, aspect < 0.82 ? -4.55 : -3.75, zoomCycle);
+    const view = translate(cameraZ);
+    const orbitX = Math.sin(time * 0.55) * (aspect < 0.82 ? 0.045 : 0.075);
+    const orbitY = Math.cos(time * 0.55) * (aspect < 0.82 ? 0.026 : 0.04);
+    const globeOffset = aspect < 0.82
+      ? translate3(-0.28 + orbitX + shakeX, -0.34 + orbitY + shakeY, 0)
+      : translate3(-0.72 + orbitX + shakeX, -0.36 + orbitY + shakeY, 0);
+    const globeScale = aspect < 0.82 ? scale3(1.14, 1.14, 1.14) : scale3(1.32, 1.32, 1.32);
+    const axisTiltX = axisPitch * Math.PI / 180;
+    const axisTiltZ = (axisRoll + shakeRoll) * Math.PI / 180;
+    const spin = rotateY(rotation + axisYaw * Math.PI / 180);
+    const tilt = multiply(rotateZ(axisTiltZ), rotateX(axisTiltX));
+    const model = multiply(multiply(globeOffset, globeScale), multiply(tilt, spin));
+    matrix = multiply(multiply(projection, view), model);
+    const markerPulse = (Math.sin(time * 8.2) + 1) * 0.5;
+    officeMarker.sizes[0] = 12 + markerPulse * 6;
+    officeMarker.sizes[1] = 26 + markerPulse * 12;
+    officeMarker.sizes[2] = 44 + markerPulse * 16;
+    gl.bindBuffer(gl.ARRAY_BUFFER, officeMarker.size);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, officeMarker.sizes);
+
+    const starDrift = translate3(Math.sin(time * 0.58) * 0.22, Math.cos(time * 0.44) * 0.12, 0);
+    const starMatrix = multiply(projection, starDrift);
+
+    gl.disable(gl.DEPTH_TEST);
+    gl.depthMask(false);
+    gl.useProgram(pointProgram.program);
+    gl.uniformMatrix4fv(pointProgram.matrix, false, starMatrix);
+    gl.uniform1f(pointProgram.pixelRatio, Math.min(window.devicePixelRatio || 1, profile.pixelRatio));
+    bindAttributes(pointProgram, starField);
+    gl.drawArrays(gl.POINTS, 0, starField.count);
+    gl.enable(gl.DEPTH_TEST);
+
+    gl.depthMask(false);
+    gl.useProgram(textureProgram.program);
+    gl.uniformMatrix4fv(textureProgram.matrix, false, matrix);
+    gl.uniform1f(textureProgram.time, time);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, mapTexture);
+    gl.uniform1i(textureProgram.map, 0);
+    bindTextureAttributes(uvSphere);
+    gl.drawArrays(gl.TRIANGLES, 0, uvSphere.count);
+    gl.depthMask(true);
+
+    gl.useProgram(lineProgram.program);
+    gl.uniformMatrix4fv(lineProgram.matrix, false, matrix);
+    gl.uniform1f(lineProgram.pixelRatio, Math.min(window.devicePixelRatio || 1, profile.pixelRatio));
+    bindAttributes(lineProgram, glowRings);
+    gl.drawArrays(gl.LINES, 0, glowRings.count);
+    bindAttributes(lineProgram, grid);
+    gl.drawArrays(gl.LINES, 0, grid.count);
+    if (pulseBuffer.count) {
+      bindAttributes(lineProgram, pulseBuffer);
+      gl.drawArrays(gl.LINES, 0, pulseBuffer.count);
+    }
+
+    gl.useProgram(pointProgram.program);
+    gl.uniformMatrix4fv(pointProgram.matrix, false, matrix);
+    gl.uniform1f(pointProgram.pixelRatio, Math.min(window.devicePixelRatio || 1, profile.pixelRatio));
+    bindAttributes(pointProgram, particleBuffer);
+    gl.drawArrays(gl.POINTS, 0, particleBuffer.count);
+    bindAttributes(pointProgram, emissionBuffer);
+    gl.drawArrays(gl.POINTS, 0, emissionBuffer.count);
+    bindAttributes(pointProgram, officeMarker);
+    gl.drawArrays(gl.POINTS, 0, officeMarker.count);
+    if (isOfficeVisible()) {
+      gl.useProgram(lineProgram.program);
+      gl.uniformMatrix4fv(lineProgram.matrix, false, matrix);
+      gl.uniform1f(lineProgram.pixelRatio, Math.min(window.devicePixelRatio || 1, profile.pixelRatio));
+      bindAttributes(lineProgram, officeLabelLine);
+      gl.drawArrays(gl.LINES, 0, officeLabelLine.count);
+
+      gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+      gl.useProgram(labelProgram.program);
+      gl.uniformMatrix4fv(labelProgram.matrix, false, matrix);
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D, officeLabel.texture);
+      gl.uniform1i(labelProgram.label, 1);
+      bindLabelAttributes(officeLabel);
+      gl.drawArrays(gl.TRIANGLES, 0, officeLabel.count);
+      gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
+    }
+
+    requestAnimationFrame(frame);
+  }
+
+  canvas.addEventListener("pointermove", (event) => {
+    const rect = canvas.getBoundingClientRect();
+    pointerX = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+    pointerY = -(((event.clientY - rect.top) / rect.height) * 2 - 1);
+    /*
+    if (!isDraggingAxis) return;
+
+    const dx = event.clientX - dragStartX;
+    const dy = event.clientY - dragStartY;
+    if (event.shiftKey) {
+      axisRoll = dragStartYaw + dx * 0.25;
+    } else {
+      axisYaw = dragStartYaw + dx * 0.25;
+      axisPitch = Math.max(-89, Math.min(89, dragStartPitch + dy * 0.25));
+    }
+    updateAxisPanel();
+    */
+  });
+
+  canvas.addEventListener("pointerdown", (event) => {
+    canvas.setPointerCapture?.(event.pointerId);
+    /*
+    isDraggingAxis = true;
+    dragStartX = event.clientX;
+    dragStartY = event.clientY;
+    dragStartPitch = axisPitch;
+    dragStartYaw = event.shiftKey ? axisRoll : axisYaw;
+    */
+    burst(screenToSphere(event.clientX, event.clientY), true);
+    shakeGlobe(1);
+    flashWorldEmissions();
+  });
+
+  function triggerGlobeEffect() {
+    burst(randomSurfacePoint(), true);
+    shakeGlobe(1);
+    flashWorldEmissions();
+  }
+
+  logoWrap?.addEventListener("click", triggerGlobeEffect);
+  logoWrap?.addEventListener("keydown", (event) => {
+    if (event.key === " " || event.key === "Enter") {
+      event.preventDefault();
+      triggerGlobeEffect();
+    }
+  });
+
+  /*
+  canvas.addEventListener("pointerup", () => {
+    isDraggingAxis = false;
+  });
+
+  canvas.addEventListener("pointercancel", () => {
+    isDraggingAxis = false;
+  });
+  */
+
+  window.addEventListener("keydown", (event) => {
+    if (event.key === " " || event.key === "Enter") {
+      burst(randomSurfacePoint(), true);
+      shakeGlobe(0.75);
+      flashWorldEmissions();
+    }
+  });
+
+  for (let i = 0; i < 4; i += 1) {
+    setTimeout(() => burst(randomSurfacePoint(), i === 0), i * 260);
+  }
+
+  requestAnimationFrame(frame);
+})();
